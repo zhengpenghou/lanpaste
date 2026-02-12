@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+      - name: Build
+        run: cargo build
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+      - name: Smoke
+        run: ./scripts/smoke.sh target/debug/lanpaste
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --locked
+      - name: Coverage gate
+        run: ./scripts/coverage.sh
