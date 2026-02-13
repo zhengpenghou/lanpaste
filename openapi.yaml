@@ -1,0 +1,402 @@
+openapi: 3.0.3
+info:
+  title: lanpaste API
+  version: v1
+  description: |
+    LAN-friendly, git-backed paste service.
+    Authentication behavior:
+    - If `--api-keys-file` is configured, API routes require `X-API-Key` with matching scopes.
+    - If API keys are disabled, `POST /api/v1/paste` can use `X-Paste-Token` when `--token` is set.
+servers:
+  - url: http://127.0.0.1:8090
+security:
+  - ApiKeyAuth: []
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    PasteTokenAuth:
+      type: apiKey
+      in: header
+      name: X-Paste-Token
+  schemas:
+    ApiIndex:
+      type: object
+      required: [name, version, endpoints]
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        endpoints:
+          type: array
+          items:
+            type: string
+    CreatePasteResponse:
+      type: object
+      required: [id, path, commit, raw_url, view_url, meta_url]
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        commit:
+          type: string
+        raw_url:
+          type: string
+        view_url:
+          type: string
+        meta_url:
+          type: string
+    PasteMeta:
+      type: object
+      required: [id, created_at, path, size, content_type, commit, sha256]
+      properties:
+        id:
+          type: string
+        created_at:
+          description: time::OffsetDateTime serialized JSON value
+        path:
+          type: string
+        size:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+        commit:
+          type: string
+        sha256:
+          type: string
+        tag:
+          type: string
+          nullable: true
+        client_ip:
+          type: string
+          nullable: true
+        user_agent:
+          type: string
+          nullable: true
+    RecentItem:
+      type: object
+      required: [id, created_at, path, commit, size, content_type]
+      properties:
+        id:
+          type: string
+        created_at:
+          description: time::OffsetDateTime serialized JSON value
+        path:
+          type: string
+        commit:
+          type: string
+        tag:
+          type: string
+          nullable: true
+        size:
+          type: integer
+          format: int64
+        content_type:
+          type: string
+    ApiError:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+paths:
+  /:
+    get:
+      summary: Dashboard page
+      security: []
+      responses:
+        '200':
+          description: HTML dashboard
+          content:
+            text/html:
+              schema:
+                type: string
+  /dashboard:
+    get:
+      summary: Dashboard page alias
+      security: []
+      responses:
+        '200':
+          description: HTML dashboard
+          content:
+            text/html:
+              schema:
+                type: string
+  /api:
+    get:
+      summary: API index
+      responses:
+        '200':
+          description: API index
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiIndex'
+        '401':
+          description: Missing/invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Missing required scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/v1/paste:
+    post:
+      summary: Create paste
+      parameters:
+        - in: query
+          name: name
+          schema:
+            type: string
+        - in: query
+          name: msg
+          schema:
+            type: string
+        - in: query
+          name: tag
+          schema:
+            type: string
+        - in: header
+          name: Idempotency-Key
+          schema:
+            type: string
+          required: false
+          description: |
+            Optional idempotency key. Replays with the same payload return the original response.
+            Reusing the same key with a different payload returns 409.
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security:
+        - ApiKeyAuth: []
+        - PasteTokenAuth: []
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePasteResponse'
+        '200':
+          description: Idempotency replay hit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePasteResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: Idempotency key conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '413':
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/v1/p/{id}:
+    get:
+      summary: Get paste metadata
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasteMeta'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/v1/p/{id}/raw:
+    get:
+      summary: Download raw paste bytes
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Raw bytes
+          headers:
+            Content-Type:
+              schema:
+                type: string
+              example: application/octet-stream
+            Content-Disposition:
+              schema:
+                type: string
+              example: attachment
+            X-Content-Type-Options:
+              schema:
+                type: string
+              example: nosniff
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/v1/recent:
+    get:
+      summary: List recent pastes
+      parameters:
+        - in: query
+          name: n
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+        - in: query
+          name: tag
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Recent list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RecentItem'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /p/{id}:
+    get:
+      summary: Rendered view
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rendered HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /healthz:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+  /readyz:
+    get:
+      summary: Readiness check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+        '503':
+          description: Not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'

@@ -2,13 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::{fs::File, net::IpAddr, path::PathBuf, sync::Arc};
 use time::OffsetDateTime;
 
-use crate::config::{PushMode, ServeCmd};
+use crate::{
+    auth::ApiKeyStore,
+    config::{PushMode, ServeCmd},
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: ServeCmd,
     pub paths: AppPaths,
     pub _daemon_lock: Arc<File>,
+    pub api_keys: ApiKeyStore,
 }
 
 #[derive(Clone, Debug)]
@@ -18,6 +22,7 @@ pub struct AppPaths {
     pub run: PathBuf,
     pub tmp: PathBuf,
     pub git_lock: PathBuf,
+    pub idempotency: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +42,7 @@ pub struct PasteMeta {
     pub user_agent: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePasteResponse {
     pub id: String,
     pub path: String,
@@ -78,6 +83,12 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdempotencyRecord {
+    pub request_fingerprint: String,
+    pub response: CreatePasteResponse,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RecentItem {
     pub id: String,
@@ -102,12 +113,14 @@ impl AppPaths {
         let run = base.join("run");
         let tmp = base.join("tmp");
         let git_lock = run.join("git.lock");
+        let idempotency = run.join("idempotency");
         Self {
             base,
             repo,
             run,
             tmp,
             git_lock,
+            idempotency,
         }
     }
 }

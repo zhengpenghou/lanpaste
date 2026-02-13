@@ -18,11 +18,14 @@ It stores each paste as a real file in a local Git repo, writes metadata next to
   - `Content-Type: application/octet-stream`
   - `Content-Disposition: attachment`
   - `X-Content-Type-Options: nosniff`
+- Optional idempotent create semantics via `Idempotency-Key` header
 - Optional auth token (`X-Paste-Token`)
+- Optional API key file with scopes and per-key rate limits (`X-API-Key`)
 - Optional CIDR allowlist (checked against real socket peer IP)
 - Optional remote push modes (`off`, `best_effort`, `strict`)
 - Readiness and health endpoints (`/readyz`, `/healthz`)
 - Single-instance daemon lock to prevent duplicate writers on same data dir
+- OpenAPI spec at `openapi.yaml` plus contract tests in `tests/contract_openapi.rs`
 
 ## Requirements
 
@@ -67,6 +70,7 @@ Options:
 - `--dir <DIR>`: Base runtime directory (required)
 - `--bind <IP:PORT>`: Listen address (default: `0.0.0.0:8090`)
 - `--token <TOKEN>`: Require `X-Paste-Token` on create endpoint
+- `--api-keys-file <PATH>`: JSON API key config (enables scoped API key auth + rate limits)
 - `--max-bytes <N>`: Max paste payload (default: `1048576`)
 - `--push <off|best_effort|strict>`: Git push behavior (default: `off`)
 - `--remote <NAME>`: Remote name for pushes (default: `origin`)
@@ -83,6 +87,27 @@ Example (token + CIDR allowlist):
   --token tok \
   --allow-cidr 192.168.1.0/24 \
   --allow-cidr 10.0.0.0/8
+```
+
+Example (`--api-keys-file`):
+
+```json
+{
+  "keys": [
+    {
+      "name": "agent-writer",
+      "key": "writer-key",
+      "scopes": ["paste:create"],
+      "max_requests_per_minute": 120
+    },
+    {
+      "name": "agent-reader",
+      "key": "reader-key",
+      "scopes": ["api:index", "paste:read", "recent:read"],
+      "max_requests_per_minute": 300
+    }
+  ]
+}
 ```
 
 ## Runtime Directory Layout
@@ -116,7 +141,9 @@ repo/
 - `POST /api/v1/paste?name=<filename>&tag=<tag>&msg=<commit-subject>`
 - Body: raw bytes
 - Header:
-  - `X-Paste-Token: <token>` when `--token` is set
+  - `X-API-Key: <key>` when `--api-keys-file` is configured (scope: `paste:create`)
+  - `X-Paste-Token: <token>` when API keys are disabled and `--token` is set
+  - `Idempotency-Key: <opaque-key>` optional replay dedupe for agent retries
   - `Content-Type` optional (used for metadata; markdown detection)
 
 Example:
@@ -142,19 +169,28 @@ Example response (`201`):
 }
 ```
 
+Idempotency replay behavior:
+
+- First request with a new `Idempotency-Key` creates the paste (`201`)
+- Repeating same key + same payload returns original response (`200`)
+- Reusing same key with different payload returns `409 conflict`
+
 ### Get metadata
 
 - `GET /api/v1/p/{id}`
+- Requires `paste:read` scope when API keys are enabled
 - Returns metadata JSON, including commit hash and checksum
 
 ### Get raw bytes
 
 - `GET /api/v1/p/{id}/raw`
+- Requires `paste:read` scope when API keys are enabled
 - Always served as download-safe binary (`application/octet-stream`, `attachment`)
 
 ### Get recent pastes
 
 - `GET /api/v1/recent?n=50&tag=<tag>`
+- Requires `recent:read` scope when API keys are enabled
 - `n` defaults to `50`, capped at `500`
 - Optional exact tag filter
 
@@ -187,6 +223,7 @@ Typical statuses:
 - `404` not found
 - `409` conflict
 - `413` payload too large
+- `429` too many requests
 - `500` internal
 - `503` service unavailable
 
@@ -207,7 +244,8 @@ Push modes:
 
 ## Security Notes
 
-- Use `--token` for write access control on shared LANs
+- Prefer `--api-keys-file` for agent usage: scoped access + per-key throttling
+- Use `--token` for simple single-secret setups
 - Use `--allow-cidr` to restrict writers by client network
 - CIDR checks use socket peer IP (not `X-Forwarded-For`)
 - Raw route intentionally avoids reflecting untrusted MIME types

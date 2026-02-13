@@ -10,6 +10,7 @@ fn cfg(base: &std::path::Path) -> ServeCmd {
         dir: base.to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
         token: None,
+        api_keys_file: None,
         max_bytes: 1024 * 1024,
         push: PushMode::Off,
         remote: "origin".to_string(),

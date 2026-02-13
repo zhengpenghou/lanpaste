@@ -16,10 +16,11 @@ use tokio::net::TcpListener;
 use tracing::warn;
 
 use crate::{
+    auth::{self, Scope},
     errors::{AppError, AppResult},
     gitops::{self, FileLock},
     render, store,
-    types::{AppState, CreatePasteInput, CreatePasteResponse, RecentItem},
+    types::{AppState, CreatePasteInput, CreatePasteResponse, IdempotencyRecord, RecentItem},
 };
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,8 @@ struct ApiIndex {
     version: &'static str,
     endpoints: Vec<&'static str>,
 }
+
+const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
@@ -87,8 +90,12 @@ async fn dashboard(State(state): State<Arc<AppState>>) -> AppResult<impl IntoRes
     Ok(Html(render::render_dashboard(&out)))
 }
 
-async fn api_index() -> impl IntoResponse {
-    axum::Json(ApiIndex {
+async fn api_index(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> AppResult<impl IntoResponse> {
+    auth::authorize(&state.api_keys, &headers, Scope::ApiIndex)?;
+    Ok(axum::Json(ApiIndex {
         name: "lanpaste",
         version: "v1",
         endpoints: vec![
@@ -97,7 +104,7 @@ async fn api_index() -> impl IntoResponse {
             "/api/v1/p/{id}/raw (GET)",
             "/api/v1/recent?n=50&tag=... (GET)",
         ],
-    })
+    }))
 }
 
 async fn create_paste(
@@ -107,8 +114,12 @@ async fn create_paste(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> AppResult<impl IntoResponse> {
-    let provided_token = headers.get("X-Paste-Token").and_then(|v| v.to_str().ok());
-    store::verify_token(state.cfg.token.as_deref(), provided_token)?;
+    if state.api_keys.enabled() {
+        auth::authorize(&state.api_keys, &headers, Scope::PasteCreate)?;
+    } else {
+        let provided_token = headers.get("X-Paste-Token").and_then(|v| v.to_str().ok());
+        store::verify_token(state.cfg.token.as_deref(), provided_token)?;
+    }
 
     let ip = Some(client_ip(ConnectInfo(remote_addr)));
     store::check_cidr(&state.cfg.allow_cidr, ip)?;
@@ -138,7 +149,29 @@ async fn create_paste(
         user_agent,
     };
 
+    let idempotency_key = headers
+        .get(IDEMPOTENCY_KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+
     let _git_lock = FileLock::acquire(&state.paths.git_lock)?;
+    let request_fingerprint = idempotency_key
+        .as_deref()
+        .map(|_| store::idempotency_fingerprint(&input));
+    if let (Some(key), Some(fingerprint)) =
+        (idempotency_key.as_deref(), request_fingerprint.as_deref())
+        && let Some(record) = store::read_idempotency_record(&state.paths.idempotency, key)?
+    {
+        if record.request_fingerprint != fingerprint {
+            return Err(AppError::Conflict(
+                "idempotency key reuse with different payload".to_string(),
+            ));
+        }
+        return Ok((StatusCode::OK, axum::Json(record.response)));
+    }
+
     let draft = store::build_paste_draft(&state.paths.repo, &state.cfg, input)?;
     let commit = gitops::commit_paste(
         &state.paths.repo,
@@ -161,21 +194,36 @@ async fn create_paste(
         meta_url: format!("/api/v1/p/{}", draft.id),
     };
 
+    if let (Some(key), Some(fingerprint)) = (idempotency_key.as_deref(), request_fingerprint) {
+        store::write_idempotency_record(
+            &state.paths.idempotency,
+            key,
+            &IdempotencyRecord {
+                request_fingerprint: fingerprint,
+                response: resp.clone(),
+            },
+        )?;
+    }
+
     Ok((StatusCode::CREATED, axum::Json(resp)))
 }
 
 async fn get_meta(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
+    auth::authorize(&state.api_keys, &headers, Scope::PasteRead)?;
     let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     Ok(axum::Json(meta))
 }
 
 async fn get_raw(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
+    auth::authorize(&state.api_keys, &headers, Scope::PasteRead)?;
     let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     let bytes = store::read_paste(&state.paths.repo, &meta)?;
     let mut response = Response::new(Body::from(bytes));
@@ -196,8 +244,10 @@ async fn get_raw(
 
 async fn recent(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(q): Query<RecentParams>,
 ) -> AppResult<impl IntoResponse> {
+    auth::authorize(&state.api_keys, &headers, Scope::RecentRead)?;
     let n = q.n.unwrap_or(50).min(500);
     let list = store::read_recent(&state.paths.repo, &state.cfg, n, q.tag.as_deref())?;
     let out: Vec<RecentItem> = list

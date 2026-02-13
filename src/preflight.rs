@@ -3,6 +3,7 @@ use std::{fs, fs::OpenOptions, path::PathBuf, sync::Arc};
 use fs2::FileExt;
 
 use crate::{
+    auth::ApiKeyStore,
     config::ServeCmd,
     errors::{AppError, AppResult},
     gitops,
@@ -13,6 +14,8 @@ pub fn run_preflight(cfg: &ServeCmd) -> AppResult<()> {
     gitops::check_git_installed()?;
     let paths = AppPaths::from_base(cfg.dir.clone());
     fs::create_dir_all(&paths.run).map_err(|e| AppError::io("create run dir", e))?;
+    fs::create_dir_all(&paths.idempotency)
+        .map_err(|e| AppError::io("create idempotency dir", e))?;
     fs::create_dir_all(&paths.tmp).map_err(|e| AppError::io("create tmp dir", e))?;
     fs::create_dir_all(&paths.repo).map_err(|e| AppError::io("create repo dir", e))?;
 
@@ -26,6 +29,7 @@ pub fn run_preflight(cfg: &ServeCmd) -> AppResult<()> {
 
 pub fn build_state(cfg: ServeCmd) -> AppResult<AppState> {
     let paths = AppPaths::from_base(cfg.dir.clone());
+    let api_keys = ApiKeyStore::from_file(cfg.api_keys_file.as_deref())?;
     let lock_path = paths.run.join("daemon.lock");
     let daemon_lock = OpenOptions::new()
         .create(true)
@@ -42,6 +46,7 @@ pub fn build_state(cfg: ServeCmd) -> AppResult<AppState> {
         cfg,
         paths,
         _daemon_lock: Arc::new(daemon_lock),
+        api_keys,
     })
 }
 

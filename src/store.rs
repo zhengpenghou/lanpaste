@@ -12,7 +12,7 @@ use crate::{
     config::ServeCmd,
     errors::{AppError, AppResult},
     gitops,
-    types::{CreatePasteInput, PasteDraft, PasteMeta},
+    types::{CreatePasteInput, IdempotencyRecord, PasteDraft, PasteMeta},
 };
 
 const MAX_SLUG_LEN: usize = 80;
@@ -241,6 +241,53 @@ pub fn remove_files(paths: &[PathBuf]) {
     }
 }
 
+fn idempotency_record_path(idempotency_dir: &Path, key: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    let file = format!("{}.json", hex::encode(hasher.finalize()));
+    idempotency_dir.join(file)
+}
+
+pub fn idempotency_fingerprint(input: &CreatePasteInput) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.name.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(input.msg.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(input.tag.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(input.content_type.as_deref().unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&input.bytes);
+    hex::encode(hasher.finalize())
+}
+
+pub fn read_idempotency_record(
+    idempotency_dir: &Path,
+    key: &str,
+) -> AppResult<Option<IdempotencyRecord>> {
+    let path = idempotency_record_path(idempotency_dir, key);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read(path).map_err(|e| AppError::io("read idempotency record", e))?;
+    let record = serde_json::from_slice::<IdempotencyRecord>(&data)
+        .map_err(|e| AppError::internal(format!("parse idempotency record: {e}")))?;
+    Ok(Some(record))
+}
+
+pub fn write_idempotency_record(
+    idempotency_dir: &Path,
+    key: &str,
+    record: &IdempotencyRecord,
+) -> AppResult<()> {
+    fs::create_dir_all(idempotency_dir).map_err(|e| AppError::io("create idempotency dir", e))?;
+    let path = idempotency_record_path(idempotency_dir, key);
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|e| AppError::internal(format!("serialize idempotency record: {e}")))?;
+    fs::write(path, bytes).map_err(|e| AppError::io("write idempotency record", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +332,7 @@ mod tests {
             dir: td.path().to_path_buf(),
             bind: "127.0.0.1:0".parse().expect("bind"),
             token: None,
+            api_keys_file: None,
             max_bytes: 1024,
             push: PushMode::Off,
             remote: "origin".to_string(),

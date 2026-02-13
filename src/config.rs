@@ -22,6 +22,8 @@ pub struct ServeCmd {
     pub bind: SocketAddr,
     #[arg(long)]
     pub token: Option<String>,
+    #[arg(long)]
+    pub api_keys_file: Option<PathBuf>,
     #[arg(long, default_value_t = 1_048_576)]
     pub max_bytes: usize,
     #[arg(long, default_value = "off")]
@@ -65,6 +67,7 @@ mod tests {
         assert_eq!(cmd.max_bytes, 1_048_576);
         assert_eq!(cmd.push, PushMode::Off);
         assert_eq!(cmd.remote, "origin");
+        assert!(cmd.api_keys_file.is_none());
         assert_eq!(cmd.git_author_name, "LAN Paste");
         assert_eq!(cmd.git_author_email, "paste@lan");
     }

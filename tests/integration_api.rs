@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{fs, net::SocketAddr, sync::Arc};
 
 use axum::{extract::connect_info::MockConnectInfo, http::StatusCode};
 use axum_test::TestServer;
@@ -13,6 +13,7 @@ fn test_cfg(base: &std::path::Path) -> ServeCmd {
         dir: base.to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
         token: Some("tok".to_string()),
+        api_keys_file: None,
         max_bytes: 1024 * 1024,
         push: PushMode::Off,
         remote: "origin".to_string(),
@@ -20,6 +21,36 @@ fn test_cfg(base: &std::path::Path) -> ServeCmd {
         git_author_name: "LAN Paste".to_string(),
         git_author_email: "paste@lan".to_string(),
     }
+}
+
+fn write_api_keys_file(path: &std::path::Path) {
+    let keys = serde_json::json!({
+        "keys": [
+            {
+                "name": "reader",
+                "key": "reader-key",
+                "scopes": ["api:index", "paste:read", "recent:read"],
+                "max_requests_per_minute": 20
+            },
+            {
+                "name": "writer",
+                "key": "writer-key",
+                "scopes": ["paste:create"],
+                "max_requests_per_minute": 20
+            },
+            {
+                "name": "limited",
+                "key": "limited-key",
+                "scopes": ["paste:create"],
+                "max_requests_per_minute": 1
+            }
+        ]
+    });
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&keys).expect("serialize keys"),
+    )
+    .expect("write keys");
 }
 
 #[tokio::test]
@@ -203,4 +234,113 @@ async fn readyz_stays_ok_during_git_lock_contention() {
     .expect("server");
 
     server.get("/readyz").await.assert_status(StatusCode::OK);
+}
+
+#[tokio::test]
+async fn idempotency_key_replays_and_conflicts_on_payload_mismatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = test_cfg(dir.path());
+    preflight::run_preflight(&cfg).expect("preflight");
+    let state = Arc::new(preflight::build_state(cfg).expect("state"));
+    let server = TestServer::new(
+        http::app(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4106)))),
+    )
+    .expect("server");
+
+    let first = server
+        .post("/api/v1/paste?name=idempotent.txt")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Idempotency-Key", "retry-123")
+        .text("same payload")
+        .await;
+    first.assert_status(StatusCode::CREATED);
+    let first_json: serde_json::Value = first.json();
+
+    let second = server
+        .post("/api/v1/paste?name=idempotent.txt")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Idempotency-Key", "retry-123")
+        .text("same payload")
+        .await;
+    second.assert_status(StatusCode::OK);
+    let second_json: serde_json::Value = second.json();
+    assert_eq!(first_json["id"], second_json["id"]);
+    assert_eq!(first_json["commit"], second_json["commit"]);
+
+    server
+        .post("/api/v1/paste?name=idempotent.txt")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Idempotency-Key", "retry-123")
+        .text("different payload")
+        .await
+        .assert_status(StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn api_keys_enforce_scopes_and_rate_limits() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = test_cfg(dir.path());
+    cfg.token = None;
+    let keys_path = dir.path().join("keys.json");
+    write_api_keys_file(&keys_path);
+    cfg.api_keys_file = Some(keys_path);
+
+    preflight::run_preflight(&cfg).expect("preflight");
+    let state = Arc::new(preflight::build_state(cfg).expect("state"));
+    let server = TestServer::new(
+        http::app(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4107)))),
+    )
+    .expect("server");
+
+    server
+        .get("/api")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    server
+        .get("/api")
+        .add_header("X-API-Key", "reader-key")
+        .await
+        .assert_status(StatusCode::OK);
+
+    server
+        .post("/api/v1/paste?name=scope.txt")
+        .add_header("X-API-Key", "reader-key")
+        .text("reader cannot write")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    let created = server
+        .post("/api/v1/paste?name=scope.txt")
+        .add_header("X-API-Key", "writer-key")
+        .text("writer can write")
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let id = created.json::<serde_json::Value>()["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    server
+        .get(&format!("/api/v1/p/{id}"))
+        .add_header("X-API-Key", "writer-key")
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    server
+        .get(&format!("/api/v1/p/{id}"))
+        .add_header("X-API-Key", "reader-key")
+        .await
+        .assert_status(StatusCode::OK);
+
+    server
+        .post("/api/v1/paste?name=limited-1.txt")
+        .add_header("X-API-Key", "limited-key")
+        .text("first")
+        .await
+        .assert_status(StatusCode::CREATED);
+    server
+        .post("/api/v1/paste?name=limited-2.txt")
+        .add_header("X-API-Key", "limited-key")
+        .text("second")
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
 }
