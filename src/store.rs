@@ -11,6 +11,7 @@ use ulid::Ulid;
 use crate::{
     config::ServeCmd,
     errors::{AppError, AppResult},
+    gitops,
     types::{CreatePasteInput, PasteDraft, PasteMeta},
 };
 
@@ -24,7 +25,9 @@ pub fn verify_token(expected: Option<&str>, provided: Option<&str>) -> AppResult
             if exp.as_bytes().ct_eq(got.as_bytes()).into() {
                 Ok(())
             } else {
-                Err(AppError::Unauthorized("missing or invalid token".to_string()))
+                Err(AppError::Unauthorized(
+                    "missing or invalid token".to_string(),
+                ))
             }
         }
     }
@@ -38,7 +41,9 @@ pub fn check_cidr(allow: &[ipnet::IpNet], ip: Option<std::net::IpAddr>) -> AppRe
     if allow.iter().any(|n| n.contains(&addr)) {
         Ok(())
     } else {
-        Err(AppError::Forbidden("client IP not in allowlist".to_string()))
+        Err(AppError::Forbidden(
+            "client IP not in allowlist".to_string(),
+        ))
     }
 }
 
@@ -84,13 +89,18 @@ pub fn choose_ext(name: Option<&str>, content_type: Option<&str>) -> &'static st
     if is_md_ct || is_md_name { "md" } else { "txt" }
 }
 
-pub fn build_paste_draft(repo: &Path, cfg: &ServeCmd, input: CreatePasteInput) -> AppResult<PasteDraft> {
+pub fn build_paste_draft(
+    repo: &Path,
+    cfg: &ServeCmd,
+    input: CreatePasteInput,
+) -> AppResult<PasteDraft> {
     let id = Ulid::new().to_string();
     let created_at = OffsetDateTime::now_utc();
     let date_path = created_at
-        .format(&time::format_description::parse("[year]/[month]/[day]").map_err(|e| {
-            AppError::internal(format!("date format parse failed: {e}"))
-        })?)
+        .format(
+            &time::format_description::parse("[year]/[month]/[day]")
+                .map_err(|e| AppError::internal(format!("date format parse failed: {e}")))?,
+        )
         .map_err(|e| AppError::internal(format!("date format failed: {e}")))?;
 
     let name = input.name.as_deref().unwrap_or("paste");
@@ -142,7 +152,8 @@ pub fn build_paste_draft(repo: &Path, cfg: &ServeCmd, input: CreatePasteInput) -
     fs::write(&abs_path, &input.bytes).map_err(|e| AppError::io("write paste", e))?;
     fs::write(
         &meta_path,
-        serde_json::to_vec_pretty(&meta).map_err(|e| AppError::internal(format!("serialize meta: {e}")))?,
+        serde_json::to_vec_pretty(&meta)
+            .map_err(|e| AppError::internal(format!("serialize meta: {e}")))?,
     )
     .map_err(|e| AppError::io("write meta", e))?;
 
@@ -161,16 +172,39 @@ pub fn build_paste_draft(repo: &Path, cfg: &ServeCmd, input: CreatePasteInput) -
     })
 }
 
-pub fn read_meta(repo: &Path, id: &str) -> AppResult<PasteMeta> {
+fn lookup_commit(repo: &Path, cfg: &ServeCmd, rel_path: &str) -> AppResult<String> {
+    let full = gitops::run_git(
+        repo,
+        &["log", "-n", "1", "--format=%H", "--", rel_path],
+        cfg,
+    )?;
+    Ok(full.chars().take(12).collect())
+}
+
+fn hydrate_commit(repo: &Path, cfg: &ServeCmd, mut meta: PasteMeta) -> AppResult<PasteMeta> {
+    if meta.commit.is_empty() {
+        meta.commit = lookup_commit(repo, cfg, &meta.path)?;
+    }
+    Ok(meta)
+}
+
+pub fn read_meta(repo: &Path, cfg: &ServeCmd, id: &str) -> AppResult<PasteMeta> {
     let path = repo.join("meta").join(format!("{id}.json"));
     if !path.exists() {
         return Err(AppError::NotFound("paste not found".to_string()));
     }
     let data = fs::read(&path).map_err(|e| AppError::io("read meta", e))?;
-    serde_json::from_slice(&data).map_err(|e| AppError::internal(format!("parse meta: {e}")))
+    let meta = serde_json::from_slice(&data)
+        .map_err(|e| AppError::internal(format!("parse meta: {e}")))?;
+    hydrate_commit(repo, cfg, meta)
 }
 
-pub fn read_recent(repo: &Path, n: usize, tag: Option<&str>) -> AppResult<Vec<PasteMeta>> {
+pub fn read_recent(
+    repo: &Path,
+    cfg: &ServeCmd,
+    n: usize,
+    tag: Option<&str>,
+) -> AppResult<Vec<PasteMeta>> {
     let meta_dir = repo.join("meta");
     if !meta_dir.exists() {
         return Ok(Vec::new());
@@ -184,12 +218,12 @@ pub fn read_recent(repo: &Path, n: usize, tag: Option<&str>) -> AppResult<Vec<Pa
         }
         let data = fs::read(&p).map_err(|e| AppError::io("read meta file", e))?;
         if let Ok(meta) = serde_json::from_slice::<PasteMeta>(&data) {
-            if let Some(expected) = tag {
-                if meta.tag.as_deref() != Some(expected) {
-                    continue;
-                }
+            if let Some(expected) = tag
+                && meta.tag.as_deref() != Some(expected)
+            {
+                continue;
             }
-            metas.push(meta);
+            metas.push(hydrate_commit(repo, cfg, meta)?);
         }
     }
     metas.sort_by(|a, b| b.created_at.cmp(&a.created_at));

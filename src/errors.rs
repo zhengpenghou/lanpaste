@@ -42,7 +42,14 @@ impl IntoResponse for AppError {
                 (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable", m)
             }
         };
-        (status, Json(ApiErrorBody { error: code.to_string(), message })).into_response()
+        (
+            status,
+            Json(ApiErrorBody {
+                error: code.to_string(),
+                message,
+            }),
+        )
+            .into_response()
     }
 }
 

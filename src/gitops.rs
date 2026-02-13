@@ -138,7 +138,11 @@ pub fn bootstrap_repo(repo: &Path, cfg: &ServeCmd) -> AppResult<()> {
 
     let has_commit = run_git(repo, &["rev-parse", "--verify", "HEAD"], cfg).is_ok();
     if !has_commit {
-        run_git(repo, &["add", "README.md", ".gitignore", "pastes", "meta"], cfg)?;
+        run_git(
+            repo,
+            &["add", "README.md", ".gitignore", "pastes", "meta"],
+            cfg,
+        )?;
         run_git(repo, &["commit", "-m", "init lanpaste repository"], cfg)?;
     }
     Ok(())
@@ -176,7 +180,9 @@ pub fn commit_paste(
                 let _ = fs::remove_file(&draft.abs_path);
                 let _ = fs::remove_file(&draft.meta_path);
                 let _ = run_git(repo, &["reset"], cfg);
-                return Err(AppError::Internal(format!("push failed in strict mode: {push_err:?}")));
+                return Err(AppError::Internal(format!(
+                    "push failed in strict mode: {push_err:?}"
+                )));
             }
             Ok(GitCommitResult {
                 commit,
@@ -187,11 +193,10 @@ pub fn commit_paste(
     }
 }
 
-pub fn ready(repo: &Path, git_lock: &Path, cfg: &ServeCmd) -> AppResult<()> {
+pub fn ready(repo: &Path, _git_lock: &Path, cfg: &ServeCmd) -> AppResult<()> {
     if !is_git_repo(repo, cfg) {
         return Err(AppError::ServiceUnavailable("repo not ready".to_string()));
     }
-    let _lock = FileLock::acquire(git_lock)?;
     Ok(())
 }
 
@@ -201,6 +206,9 @@ mod tests {
 
     #[test]
     fn push_mode_display() {
-        assert_eq!(crate::types::push_mode_label(PushMode::BestEffort), "best_effort");
+        assert_eq!(
+            crate::types::push_mode_label(PushMode::BestEffort),
+            "best_effort"
+        );
     }
 }

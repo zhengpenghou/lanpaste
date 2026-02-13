@@ -37,7 +37,13 @@ fn bootstrap_repo_creates_initial_commit_and_layout() {
         .current_dir(repo)
         .output()
         .expect("git rev-list");
-    assert!(String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().expect("count") >= 1);
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>()
+            .expect("count")
+            >= 1
+    );
 }
 
 #[test]

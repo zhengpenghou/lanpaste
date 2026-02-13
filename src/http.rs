@@ -1,22 +1,24 @@
-use std::{net::IpAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
     Router,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::warn;
 
 use crate::{
     errors::{AppError, AppResult},
     gitops::{self, FileLock},
-    render,
-    store,
+    render, store,
     types::{AppState, CreatePasteInput, CreatePasteResponse, RecentItem},
 };
 
@@ -33,8 +35,18 @@ struct RecentParams {
     tag: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct ApiIndex {
+    name: &'static str,
+    version: &'static str,
+    endpoints: Vec<&'static str>,
+}
+
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(dashboard))
+        .route("/dashboard", get(dashboard))
+        .route("/api", get(api_index))
         .route("/api/v1/paste", post(create_paste))
         .route("/api/v1/p/{id}", get(get_meta))
         .route("/api/v1/p/{id}/raw", get(get_raw))
@@ -50,13 +62,47 @@ pub async fn run_server(state: Arc<AppState>) -> AppResult<()> {
     let listener = TcpListener::bind(state.cfg.bind)
         .await
         .map_err(|e| AppError::internal(format!("bind failed: {e}")))?;
-    axum::serve(listener, app(state))
-        .await
-        .map_err(|e| AppError::internal(format!("server failed: {e}")))
+    axum::serve(
+        listener,
+        app(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| AppError::internal(format!("server failed: {e}")))
+}
+
+async fn dashboard(State(state): State<Arc<AppState>>) -> AppResult<impl IntoResponse> {
+    let list = store::read_recent(&state.paths.repo, &state.cfg, 20, None)?;
+    let out: Vec<RecentItem> = list
+        .into_iter()
+        .map(|m| RecentItem {
+            id: m.id,
+            created_at: m.created_at,
+            path: m.path,
+            commit: m.commit,
+            tag: m.tag,
+            size: m.size,
+            content_type: m.content_type,
+        })
+        .collect();
+    Ok(Html(render::render_dashboard(&out)))
+}
+
+async fn api_index() -> impl IntoResponse {
+    axum::Json(ApiIndex {
+        name: "lanpaste",
+        version: "v1",
+        endpoints: vec![
+            "/api/v1/paste (POST)",
+            "/api/v1/p/{id} (GET)",
+            "/api/v1/p/{id}/raw (GET)",
+            "/api/v1/recent?n=50&tag=... (GET)",
+        ],
+    })
 }
 
 async fn create_paste(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     Query(params): Query<CreateParams>,
     headers: HeaderMap,
     body: axum::body::Bytes,
@@ -64,11 +110,13 @@ async fn create_paste(
     let provided_token = headers.get("X-Paste-Token").and_then(|v| v.to_str().ok());
     store::verify_token(state.cfg.token.as_deref(), provided_token)?;
 
-    let ip = client_ip(&headers);
+    let ip = Some(client_ip(ConnectInfo(remote_addr)));
     store::check_cidr(&state.cfg.allow_cidr, ip)?;
 
     if body.len() > state.cfg.max_bytes {
-        return Err(AppError::TooLarge("request body exceeds max-bytes".to_string()));
+        return Err(AppError::TooLarge(
+            "request body exceeds max-bytes".to_string(),
+        ));
     }
 
     let content_type = headers
@@ -120,7 +168,7 @@ async fn get_meta(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let meta = store::read_meta(&state.paths.repo, &id)?;
+    let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     Ok(axum::Json(meta))
 }
 
@@ -128,14 +176,20 @@ async fn get_raw(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
-    let meta = store::read_meta(&state.paths.repo, &id)?;
+    let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     let bytes = store::read_paste(&state.paths.repo, &meta)?;
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        meta.content_type
-            .parse()
-            .unwrap_or(header::HeaderValue::from_static("text/plain; charset=utf-8")),
+        header::HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        header::HeaderValue::from_static("attachment"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
     );
     Ok(response)
 }
@@ -145,7 +199,7 @@ async fn recent(
     Query(q): Query<RecentParams>,
 ) -> AppResult<impl IntoResponse> {
     let n = q.n.unwrap_or(50).min(500);
-    let list = store::read_recent(&state.paths.repo, n, q.tag.as_deref())?;
+    let list = store::read_recent(&state.paths.repo, &state.cfg, n, q.tag.as_deref())?;
     let out: Vec<RecentItem> = list
         .into_iter()
         .map(|m| RecentItem {
@@ -165,7 +219,7 @@ async fn render_view(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
-    let meta = store::read_meta(&state.paths.repo, &id)?;
+    let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     let bytes = store::read_paste(&state.paths.repo, &meta)?;
     let body = String::from_utf8_lossy(&bytes);
     let html = if meta.content_type.contains("markdown") || meta.path.ends_with(".md") {
@@ -187,13 +241,8 @@ async fn readyz(State(state): State<Arc<AppState>>) -> AppResult<impl IntoRespon
     Ok((StatusCode::OK, "ok"))
 }
 
-fn client_ip(headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("X-Forwarded-For")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .and_then(|v| v.parse().ok())
+fn client_ip(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> IpAddr {
+    addr.ip()
 }
 
 #[cfg(test)]
@@ -201,11 +250,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forwarded_ip_parse() {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Forwarded-For", "192.168.1.2".parse().expect("header"));
+    fn client_ip_from_connect_info() {
+        let addr: SocketAddr = "192.168.1.2:4321".parse().expect("addr");
         assert_eq!(
-            client_ip(&headers).expect("ip").to_string(),
+            client_ip(ConnectInfo(addr)).to_string(),
             "192.168.1.2".to_string()
         );
     }

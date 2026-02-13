@@ -14,9 +14,7 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
-    let cfg = match cli.command {
-        Commands::Serve(cmd) => cmd,
-    };
+    let Commands::Serve(cfg) = cli.command;
 
     if let Err(err) = preflight::run_preflight(&cfg) {
         eprintln!("{err:?}");
