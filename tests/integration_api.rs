@@ -75,6 +75,8 @@ async fn create_and_read_endpoints_work() {
     let json: serde_json::Value = create.json();
     let id = json["id"].as_str().expect("id");
     let create_commit = json["commit"].as_str().expect("commit").to_string();
+    let view_url = json["view_url"].as_str().expect("view_url").to_string();
+    assert_eq!(view_url, format!("/p/{id}/note.md"));
     assert!(!create_commit.is_empty());
 
     let api = server.get("/api").await;
@@ -133,9 +135,13 @@ async fn create_and_read_endpoints_work() {
         create_commit
     );
 
-    let view = server.get(&format!("/p/{id}")).await;
+    let view = server.get(&view_url).await;
     view.assert_status(StatusCode::OK);
     assert!(view.text().contains("<h1>hello</h1>") || view.text().contains("hello"));
+    server
+        .get(&format!("/p/{id}"))
+        .await
+        .assert_status(StatusCode::OK);
 
     server.get("/healthz").await.assert_status(StatusCode::OK);
     server.get("/readyz").await.assert_status(StatusCode::OK);

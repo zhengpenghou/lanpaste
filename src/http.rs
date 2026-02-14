@@ -54,6 +54,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/api/v1/p/{id}", get(get_meta))
         .route("/api/v1/p/{id}/raw", get(get_raw))
         .route("/api/v1/recent", get(recent))
+        .route("/p/{id}/{slug}", get(render_view_with_slug))
         .route("/p/{id}", get(render_view))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
@@ -190,7 +191,11 @@ async fn create_paste(
         path: draft.rel_path.clone(),
         commit: commit.commit,
         raw_url: format!("/api/v1/p/{}/raw", draft.id),
-        view_url: format!("/p/{}", draft.id),
+        view_url: format!(
+            "/p/{}/{}",
+            draft.id,
+            store::slug_from_rel_path(&draft.rel_path).unwrap_or_else(|| "paste".to_string())
+        ),
         meta_url: format!("/api/v1/p/{}", draft.id),
     };
 
@@ -269,10 +274,24 @@ async fn render_view(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<impl IntoResponse> {
+    render_view_by_id(&state, &id).await
+}
+
+async fn render_view_with_slug(
+    State(state): State<Arc<AppState>>,
+    Path((id, _slug)): Path<(String, String)>,
+) -> AppResult<impl IntoResponse> {
+    render_view_by_id(&state, &id).await
+}
+
+async fn render_view_by_id(state: &AppState, id: &str) -> AppResult<Html<String>> {
     let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
     let bytes = store::read_paste(&state.paths.repo, &meta)?;
     let body = String::from_utf8_lossy(&bytes);
-    let html = if meta.content_type.contains("markdown") || meta.path.ends_with(".md") {
+    let html = if meta.content_type.contains("markdown")
+        || meta.path.ends_with(".md")
+        || render::looks_like_markdown(&body)
+    {
         render::render_markdown(&body)
     } else {
         format!("<pre>{}</pre>", render::html_escape(&body))

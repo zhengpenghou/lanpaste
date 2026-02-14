@@ -235,6 +235,20 @@ pub fn read_paste(repo: &Path, meta: &PasteMeta) -> AppResult<Vec<u8>> {
     fs::read(repo.join(&meta.path)).map_err(|e| AppError::io("read paste", e))
 }
 
+pub fn slug_from_rel_path(rel_path: &str) -> Option<String> {
+    let file_name = Path::new(rel_path).file_name()?.to_str()?;
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(file_name);
+    let (_, slug) = stem.split_once("__")?;
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug.to_string())
+    }
+}
+
 pub fn remove_files(paths: &[PathBuf]) {
     for path in paths {
         let _ = fs::remove_file(path);
@@ -359,5 +373,11 @@ mod tests {
         assert!(draft.meta_rel_path.starts_with("meta/"));
         assert!(draft.abs_path.exists());
         assert!(draft.meta_path.exists());
+    }
+
+    #[test]
+    fn slug_from_rel_path_works() {
+        let slug = slug_from_rel_path("pastes/2026/02/13/01ABC__note.md.md").expect("slug");
+        assert_eq!(slug, "note.md");
     }
 }

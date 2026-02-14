@@ -41,6 +41,7 @@ fn openapi_spec_declares_core_routes_and_security() {
         "/api/v1/p/{id}/raw",
         "/api/v1/recent",
         "/p/{id}",
+        "/p/{id}/{slug}",
         "/healthz",
         "/readyz",
     ] {
@@ -89,6 +90,13 @@ async fn runtime_contract_matches_openapi_critical_shapes() {
         assert!(created_json.get(key).is_some(), "missing create key {key}");
     }
     let id = created_json["id"].as_str().expect("id");
+    assert!(
+        created_json["view_url"]
+            .as_str()
+            .expect("view_url")
+            .starts_with(&format!("/p/{id}/")),
+        "view_url should include slug path segment"
+    );
 
     let meta = server.get(&format!("/api/v1/p/{id}")).await;
     meta.assert_status(StatusCode::OK);

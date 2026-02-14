@@ -351,11 +351,39 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /p/{id}:
     get:
+      summary: Rendered view (legacy id-only alias)
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rendered HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /p/{id}/{slug}:
+    get:
       summary: Rendered view
       security: []
       parameters:
         - in: path
           name: id
+          required: true
+          schema:
+            type: string
+        - in: path
+          name: slug
           required: true
           schema:
             type: string
