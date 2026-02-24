@@ -13,7 +13,7 @@ It stores each paste as a real file in a local Git repo, writes metadata next to
   - `/dashboard`
 - API index route:
   - `/api`
-- Markdown rendering for view pages (`/p/{id}/{slug}`) with sanitization
+- Markdown rendering for view pages (`/p/{id}/{slug}`, `/p/{id}/md`) with sanitization
 - Markdown tables, fenced code blocks, headings, LaTeX (KaTeX), and Mermaid diagram rendering
 - Safe raw download route (`/api/v1/p/{id}/raw`) with:
   - `Content-Type: application/octet-stream`
@@ -198,6 +198,7 @@ Idempotency replay behavior:
 ### Rendered view
 
 - `GET /p/{id}/{slug}` (canonical)
+- `GET /p/{id}/md` (force markdown rendering)
 - `GET /p/{id}` (legacy alias)
 - Markdown pastes are rendered and sanitized; markdown-looking content is auto-detected
 - Non-markdown content is shown in escaped `<pre>`

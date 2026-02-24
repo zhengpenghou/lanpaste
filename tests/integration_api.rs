@@ -94,6 +94,7 @@ async fn create_and_read_endpoints_work() {
     dashboard.assert_status(StatusCode::OK);
     assert!(dashboard.text().contains("LAN Paste Dashboard"));
     assert!(dashboard.text().contains("/api/v1/paste"));
+    assert!(dashboard.text().contains(&format!("/p/{id}/md")));
 
     let dashboard_alias = server.get("/dashboard").await;
     dashboard_alias.assert_status(StatusCode::OK);
@@ -142,6 +143,9 @@ async fn create_and_read_endpoints_work() {
         .get(&format!("/p/{id}"))
         .await
         .assert_status(StatusCode::OK);
+    let md_view = server.get(&format!("/p/{id}/md")).await;
+    md_view.assert_status(StatusCode::OK);
+    assert!(md_view.text().contains("<h1>hello</h1>") || md_view.text().contains("hello"));
 
     server.get("/healthz").await.assert_status(StatusCode::OK);
     server.get("/readyz").await.assert_status(StatusCode::OK);

@@ -150,7 +150,7 @@ pub fn render_dashboard(recent: &[RecentItem]) -> String {
                     <td>{tag}</td>\
                     <td>{ctype}</td>\
                     <td>{}</td>\
-                    <td><a href=\"/api/v1/p/{id}\">meta</a> · <a href=\"/api/v1/p/{id}/raw\">raw</a> · <code>{path}</code></td>\
+                    <td><a href=\"/api/v1/p/{id}\">meta</a> · <a href=\"/p/{id}/md\">md</a> · <code>{path}</code></td>\
                 </tr>",
                 item.size
             ));
@@ -236,7 +236,7 @@ mod tests {
         }]);
         assert!(out.contains("LAN Paste Dashboard"));
         assert!(out.contains("/api/v1/paste"));
-        assert!(out.contains("/api/v1/p/01TEST/raw"));
+        assert!(out.contains("/p/01TEST/md"));
         assert!(out.contains("/p/01TEST/note.md"));
     }
 

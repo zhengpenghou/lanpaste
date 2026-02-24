@@ -40,6 +40,7 @@ fn openapi_spec_declares_core_routes_and_security() {
         "/api/v1/p/{id}",
         "/api/v1/p/{id}/raw",
         "/api/v1/recent",
+        "/p/{id}/md",
         "/p/{id}",
         "/p/{id}/{slug}",
         "/healthz",

@@ -349,6 +349,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /p/{id}/md:
+    get:
+      summary: Rendered view (force markdown)
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Rendered HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /p/{id}:
     get:
       summary: Rendered view (legacy id-only alias)
