@@ -6,7 +6,7 @@ info:
     LAN-friendly, git-backed paste service.
     Authentication behavior:
     - If `--api-keys-file` is configured, API routes require `X-API-Key` with matching scopes.
-    - If API keys are disabled, `POST /api/v1/paste` can use `X-Paste-Token` when `--token` is set.
+    - If API keys are disabled, `POST /api/v1/paste` and `POST /api/v1/upload` can use `X-Paste-Token` when `--token` is set.
 servers:
   - url: http://127.0.0.1:8090
 security:
@@ -50,6 +50,27 @@ components:
           type: string
         meta_url:
           type: string
+    UploadResponse:
+      type: object
+      required: [id, url, contentType, bytes, width, height, createdAt]
+      properties:
+        id:
+          type: string
+        url:
+          type: string
+        contentType:
+          type: string
+        bytes:
+          type: integer
+          format: int64
+        width:
+          type: integer
+          format: int64
+        height:
+          type: integer
+          format: int64
+        createdAt:
+          description: time::OffsetDateTime serialized JSON value
     PasteMeta:
       type: object
       required: [id, created_at, path, size, content_type, commit, sha256]
@@ -60,6 +81,9 @@ components:
           description: time::OffsetDateTime serialized JSON value
         path:
           type: string
+        slug:
+          type: string
+          nullable: true
         size:
           type: integer
           format: int64
@@ -122,6 +146,29 @@ paths:
     get:
       summary: Dashboard page alias
       security: []
+      responses:
+        '200':
+          description: HTML dashboard
+          content:
+            text/html:
+              schema:
+                type: string
+  /recent:
+    get:
+      summary: Recent pastes page (optional tag filter)
+      security: []
+      parameters:
+        - in: query
+          name: n
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+        - in: query
+          name: tag
+          schema:
+            type: string
       responses:
         '200':
           description: HTML dashboard
@@ -215,6 +262,64 @@ paths:
                 $ref: '#/components/schemas/ApiError'
         '409':
           description: Idempotency key conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '413':
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/v1/upload:
+    post:
+      summary: Upload image for markdown embedding
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                name:
+                  type: string
+                tag:
+                  type: string
+      security:
+        - ApiKeyAuth: []
+        - PasteTokenAuth: []
+      responses:
+        '200':
+          description: Uploaded (or dedup hit)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '400':
+          description: Invalid multipart payload or unsupported image type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '403':
+          description: Forbidden
           content:
             application/json:
               schema:
@@ -349,6 +454,57 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /files/{name}:
+    get:
+      summary: Serve uploaded image
+      security: []
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Image bytes
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              example: public, max-age=31536000, immutable
+            X-Content-Type-Options:
+              schema:
+                type: string
+              example: nosniff
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid file path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
   /p/{id}/md:
     get:
       summary: Rendered view (force markdown)
@@ -374,7 +530,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /p/{id}:
     get:
-      summary: Rendered view (legacy id-only alias)
+      summary: Rendered view by canonical id, or slug alias redirect
       security: []
       parameters:
         - in: path
@@ -384,9 +540,15 @@ paths:
             type: string
       responses:
         '200':
-          description: Rendered HTML page
+          description: Rendered HTML page (when `{id}` is a paste id)
           content:
             text/html:
+              schema:
+                type: string
+        '302':
+          description: Redirect to canonical `/p/{id}` when path segment is a slug alias
+          headers:
+            Location:
               schema:
                 type: string
         '404':
