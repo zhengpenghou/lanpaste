@@ -89,8 +89,8 @@ async fn dashboard(
     Query(params): Query<DashboardParams>,
 ) -> AppResult<impl IntoResponse> {
     let n = params.n.unwrap_or(50).min(500);
-    let list = store::read_recent(&state.paths.repo, &state.cfg, n, params.tag.as_deref())?;
-    let tags = store::list_tags(&state.paths.repo)?;
+    let (list, tags) =
+        store::read_recent_with_tags(&state.paths.repo, &state.cfg, n, params.tag.as_deref())?;
     let out: Vec<RecentItem> = list
         .into_iter()
         .map(|m| RecentItem {

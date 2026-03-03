@@ -547,6 +547,19 @@ fn promote_mermaid_blocks(html_in: &str) -> String {
     out
 }
 
+fn url_encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
 pub fn slug_from_rel_path(rel_path: &str) -> Option<String> {
     let file_name = std::path::Path::new(rel_path).file_name()?.to_str()?;
     let stem = file_name
@@ -612,10 +625,11 @@ pub fn render_dashboard(
         } else {
             "tag-chip"
         };
+        let encoded_tag = url_encode_component(tag);
         tags.push_str(&format!(
             "<a class=\"{}\" href=\"/recent?tag={}\">{} <strong>{}</strong></a>",
             class,
-            html_escape(tag),
+            html_escape(&encoded_tag),
             html_escape(tag),
             count
         ));
@@ -725,6 +739,16 @@ mod tests {
         assert!(out.contains("/api/v1/paste"));
         assert!(out.contains("/p/01TEST/md"));
         assert!(out.contains("/recent?tag=demo"));
+    }
+
+    #[test]
+    fn dashboard_url_encodes_tag_links() {
+        let out = render_dashboard(
+            &[],
+            &[("a&b c+1".to_string(), 2)],
+            Some("a&b c+1"),
+        );
+        assert!(out.contains("/recent?tag=a%26b%20c%2B1"));
     }
 
     #[test]

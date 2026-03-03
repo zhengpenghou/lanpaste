@@ -166,6 +166,16 @@ async fn create_and_read_endpoints_work() {
         .await
         .assert_status(StatusCode::OK);
 
+    server
+        .get(&format!("/p/%2e%2e%2fmeta%2f{id}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    server
+        .get(&format!("/api/v1/p/%2e%2e%2fmeta%2f{id}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
     server.get("/healthz").await.assert_status(StatusCode::OK);
     server.get("/readyz").await.assert_status(StatusCode::OK);
 }

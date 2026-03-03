@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
 };
 
@@ -16,6 +17,7 @@ use crate::{
 };
 
 const MAX_SLUG_LEN: usize = 80;
+pub type RecentWithTags = (Vec<PasteMeta>, Vec<(String, usize)>);
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct SlugRecord {
@@ -259,6 +261,13 @@ fn lookup_commit(repo: &Path, cfg: &ServeCmd, rel_path: &str) -> AppResult<Strin
     Ok(full.chars().take(12).collect())
 }
 
+fn is_valid_paste_id(id: &str) -> bool {
+    id.len() == 26
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() && !ch.is_ascii_lowercase())
+}
+
 fn hydrate_commit(repo: &Path, cfg: &ServeCmd, mut meta: PasteMeta) -> AppResult<PasteMeta> {
     if meta.commit.is_empty() {
         meta.commit = lookup_commit(repo, cfg, &meta.path)?;
@@ -267,6 +276,9 @@ fn hydrate_commit(repo: &Path, cfg: &ServeCmd, mut meta: PasteMeta) -> AppResult
 }
 
 pub fn read_meta(repo: &Path, cfg: &ServeCmd, id: &str) -> AppResult<PasteMeta> {
+    if !is_valid_paste_id(id) {
+        return Err(AppError::NotFound("paste not found".to_string()));
+    }
     let path = repo.join("meta").join(format!("{id}.json"));
     if !path.exists() {
         return Err(AppError::NotFound("paste not found".to_string()));
@@ -277,17 +289,18 @@ pub fn read_meta(repo: &Path, cfg: &ServeCmd, id: &str) -> AppResult<PasteMeta> 
     hydrate_commit(repo, cfg, meta)
 }
 
-pub fn read_recent(
+pub fn read_recent_with_tags(
     repo: &Path,
     cfg: &ServeCmd,
     n: usize,
     tag: Option<&str>,
-) -> AppResult<Vec<PasteMeta>> {
+) -> AppResult<RecentWithTags> {
     let meta_dir = repo.join("meta");
     if !meta_dir.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut metas = Vec::new();
+    let mut counts = std::collections::HashMap::<String, usize>::new();
     for entry in fs::read_dir(meta_dir).map_err(|e| AppError::io("read meta dir", e))? {
         let entry = entry.map_err(|e| AppError::io("read meta entry", e))?;
         let p = entry.path();
@@ -296,6 +309,11 @@ pub fn read_recent(
         }
         let data = fs::read(&p).map_err(|e| AppError::io("read meta file", e))?;
         if let Ok(meta) = serde_json::from_slice::<PasteMeta>(&data) {
+            if let Some(t) = meta.tag.as_ref()
+                && !t.trim().is_empty()
+            {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
             if let Some(expected) = tag
                 && meta.tag.as_deref() != Some(expected)
             {
@@ -306,33 +324,20 @@ pub fn read_recent(
     }
     metas.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     metas.truncate(n);
-    Ok(metas)
+
+    let mut tags: Vec<(String, usize)> = counts.into_iter().collect();
+    tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok((metas, tags))
 }
 
-pub fn list_tags(repo: &Path) -> AppResult<Vec<(String, usize)>> {
-    let meta_dir = repo.join("meta");
-    if !meta_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut counts = std::collections::HashMap::<String, usize>::new();
-    for entry in fs::read_dir(meta_dir).map_err(|e| AppError::io("read meta dir", e))? {
-        let entry = entry.map_err(|e| AppError::io("read meta entry", e))?;
-        let p = entry.path();
-        if p.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let data = fs::read(&p).map_err(|e| AppError::io("read meta file", e))?;
-        if let Ok(meta) = serde_json::from_slice::<PasteMeta>(&data)
-            && let Some(tag) = meta.tag
-            && !tag.trim().is_empty()
-        {
-            *counts.entry(tag).or_insert(0) += 1;
-        }
-    }
-
-    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
-    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    Ok(out)
+pub fn read_recent(
+    repo: &Path,
+    cfg: &ServeCmd,
+    n: usize,
+    tag: Option<&str>,
+) -> AppResult<Vec<PasteMeta>> {
+    let (metas, _) = read_recent_with_tags(repo, cfg, n, tag)?;
+    Ok(metas)
 }
 
 pub fn read_paste(repo: &Path, meta: &PasteMeta) -> AppResult<Vec<u8>> {
@@ -365,6 +370,18 @@ fn content_type_for_ext(ext: &str) -> Option<&'static str> {
     }
 }
 
+fn write_create_new(path: &Path, bytes: &[u8], ctx: &str) -> AppResult<bool> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes).map_err(|e| AppError::io(ctx, e))?;
+            file.sync_all().map_err(|e| AppError::io(ctx, e))?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(AppError::io(ctx, e)),
+    }
+}
+
 pub fn persist_upload(
     paths: &AppPaths,
     bytes: &[u8],
@@ -391,30 +408,28 @@ pub fn persist_upload(
     fs::create_dir_all(&paths.files).map_err(|e| AppError::io("create files dir", e))?;
     fs::create_dir_all(&paths.files_meta).map_err(|e| AppError::io("create files meta dir", e))?;
 
-    if !file_path.exists() {
-        fs::write(&file_path, bytes).map_err(|e| AppError::io("write upload file", e))?;
-    }
+    let _ = write_create_new(&file_path, bytes, "write upload file")?;
 
-    let meta = if meta_path.exists() {
+    let draft_meta = FileMeta {
+        id: id.clone(),
+        ext: ext.to_string(),
+        content_type: content_type.to_string(),
+        bytes: bytes.len(),
+        width: dims.width,
+        height: dims.height,
+        created_at: OffsetDateTime::now_utc(),
+        name,
+        tag,
+    };
+    let meta_raw = serde_json::to_vec_pretty(&draft_meta)
+        .map_err(|e| AppError::internal(format!("serialize upload meta: {e}")))?;
+    let wrote_meta = write_create_new(&meta_path, &meta_raw, "write upload meta")?;
+    let meta = if wrote_meta {
+        draft_meta
+    } else {
         let data = fs::read(&meta_path).map_err(|e| AppError::io("read upload meta", e))?;
         serde_json::from_slice::<FileMeta>(&data)
             .map_err(|e| AppError::internal(format!("parse upload meta: {e}")))?
-    } else {
-        let meta = FileMeta {
-            id: id.clone(),
-            ext: ext.to_string(),
-            content_type: content_type.to_string(),
-            bytes: bytes.len(),
-            width: dims.width,
-            height: dims.height,
-            created_at: OffsetDateTime::now_utc(),
-            name,
-            tag,
-        };
-        let raw = serde_json::to_vec_pretty(&meta)
-            .map_err(|e| AppError::internal(format!("serialize upload meta: {e}")))?;
-        fs::write(&meta_path, raw).map_err(|e| AppError::io("write upload meta", e))?;
-        meta
     };
 
     Ok(UploadResponse {
@@ -630,6 +645,28 @@ mod tests {
     fn slug_from_rel_path_works() {
         let slug = slug_from_rel_path("pastes/2026/02/13/01ABC__note.md.md").expect("slug");
         assert_eq!(slug, "note.md");
+    }
+
+    #[test]
+    fn read_meta_rejects_non_id_path_segments() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let repo = td.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let cfg = ServeCmd {
+            dir: td.path().to_path_buf(),
+            bind: "127.0.0.1:0".parse().expect("bind"),
+            token: None,
+            api_keys_file: None,
+            max_bytes: 1024,
+            push: PushMode::Off,
+            remote: "origin".to_string(),
+            allow_cidr: vec![],
+            git_author_name: "LAN Paste".to_string(),
+            git_author_email: "paste@lan".to_string(),
+        };
+        let err = read_meta(&repo, &cfg, "../meta/01KHA55MQ0NRF2FGCSR0A1H3B5")
+            .expect_err("invalid id should fail");
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 
     #[test]

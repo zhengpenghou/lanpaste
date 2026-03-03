@@ -21,3 +21,10 @@
 - Added image upload and serving (`POST /api/v1/upload`, `GET /files/{name}`) with sha256 dedupe and immutable cache headers.
 - Added slug maps with collision suffixing and alias redirects (`/p/{slug}` -> `302 /p/{id}`), while keeping canonical ID route.
 - Updated tests, OpenAPI contract, and README to reflect the new behavior.
+
+## PR Feedback Patch (2026-03-03)
+- [x] Security: validate paste IDs before metadata path resolution to block traversal in `/p/{...}` and `/api/v1/p/{id}`.
+- [x] Correctness: URL-encode tag query values in `/recent?tag=...` links.
+- [x] Reliability: replace upload `exists()+write` race with atomic `create_new` writes.
+- [x] Performance: avoid double metadata scans by introducing one-pass `read_recent_with_tags`.
+- [x] Verification: add regression tests + run `cargo test` and strict clippy.
