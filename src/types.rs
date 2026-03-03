@@ -21,6 +21,8 @@ pub struct AppPaths {
     pub repo: PathBuf,
     pub run: PathBuf,
     pub tmp: PathBuf,
+    pub files: PathBuf,
+    pub files_meta: PathBuf,
     pub git_lock: PathBuf,
     pub idempotency: PathBuf,
 }
@@ -30,6 +32,8 @@ pub struct PasteMeta {
     pub id: String,
     pub created_at: OffsetDateTime,
     pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
     pub size: usize,
     pub content_type: String,
     pub commit: String,
@@ -66,10 +70,13 @@ pub struct CreatePasteInput {
 #[derive(Debug)]
 pub struct PasteDraft {
     pub id: String,
+    pub slug: String,
     pub rel_path: String,
     pub abs_path: PathBuf,
     pub meta_path: PathBuf,
     pub meta_rel_path: String,
+    pub slug_rel_path: String,
+    pub slug_path: PathBuf,
     pub content_type: String,
     pub size: usize,
     pub sha256: String,
@@ -100,6 +107,34 @@ pub struct RecentItem {
     pub content_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileMeta {
+    pub id: String,
+    pub ext: String,
+    pub content_type: String,
+    pub bytes: usize,
+    pub width: usize,
+    pub height: usize,
+    pub created_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadResponse {
+    pub id: String,
+    pub url: String,
+    #[serde(rename = "contentType")]
+    pub content_type: String,
+    pub bytes: usize,
+    pub width: usize,
+    pub height: usize,
+    #[serde(rename = "createdAt")]
+    pub created_at: OffsetDateTime,
+}
+
 #[derive(Debug)]
 pub struct GitCommitResult {
     pub commit: String,
@@ -112,6 +147,8 @@ impl AppPaths {
         let repo = base.join("repo");
         let run = base.join("run");
         let tmp = base.join("tmp");
+        let files = base.join("files");
+        let files_meta = files.join("meta");
         let git_lock = run.join("git.lock");
         let idempotency = run.join("idempotency");
         Self {
@@ -119,6 +156,8 @@ impl AppPaths {
             repo,
             run,
             tmp,
+            files,
+            files_meta,
             git_lock,
             idempotency,
         }

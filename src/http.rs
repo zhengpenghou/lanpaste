@@ -6,7 +6,7 @@ use std::{
 use axum::{
     Router,
     body::Body,
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ConnectInfo, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -36,6 +36,12 @@ struct RecentParams {
     tag: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct DashboardParams {
+    n: Option<usize>,
+    tag: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiIndex {
     name: &'static str,
@@ -49,11 +55,14 @@ pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/dashboard", get(dashboard))
+        .route("/recent", get(dashboard))
         .route("/api", get(api_index))
         .route("/api/v1/paste", post(create_paste))
+        .route("/api/v1/upload", post(upload_file))
         .route("/api/v1/p/{id}", get(get_meta))
         .route("/api/v1/p/{id}/raw", get(get_raw))
         .route("/api/v1/recent", get(recent))
+        .route("/files/{name}", get(get_file))
         .route("/p/{id}/md", get(render_view_markdown))
         .route("/p/{id}/{slug}", get(render_view_with_slug))
         .route("/p/{id}", get(render_view))
@@ -75,8 +84,13 @@ pub async fn run_server(state: Arc<AppState>) -> AppResult<()> {
     .map_err(|e| AppError::internal(format!("server failed: {e}")))
 }
 
-async fn dashboard(State(state): State<Arc<AppState>>) -> AppResult<impl IntoResponse> {
-    let list = store::read_recent(&state.paths.repo, &state.cfg, 20, None)?;
+async fn dashboard(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DashboardParams>,
+) -> AppResult<impl IntoResponse> {
+    let n = params.n.unwrap_or(50).min(500);
+    let list = store::read_recent(&state.paths.repo, &state.cfg, n, params.tag.as_deref())?;
+    let tags = store::list_tags(&state.paths.repo)?;
     let out: Vec<RecentItem> = list
         .into_iter()
         .map(|m| RecentItem {
@@ -89,7 +103,11 @@ async fn dashboard(State(state): State<Arc<AppState>>) -> AppResult<impl IntoRes
             content_type: m.content_type,
         })
         .collect();
-    Ok(Html(render::render_dashboard(&out)))
+    Ok(Html(render::render_dashboard(
+        &out,
+        &tags,
+        params.tag.as_deref(),
+    )))
 }
 
 async fn api_index(
@@ -102,9 +120,11 @@ async fn api_index(
         version: "v1",
         endpoints: vec![
             "/api/v1/paste (POST)",
+            "/api/v1/upload (POST)",
             "/api/v1/p/{id} (GET)",
             "/api/v1/p/{id}/raw (GET)",
             "/api/v1/recent?n=50&tag=... (GET)",
+            "/files/{name} (GET)",
         ],
     }))
 }
@@ -116,12 +136,7 @@ async fn create_paste(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> AppResult<impl IntoResponse> {
-    if state.api_keys.enabled() {
-        auth::authorize(&state.api_keys, &headers, Scope::PasteCreate)?;
-    } else {
-        let provided_token = headers.get("X-Paste-Token").and_then(|v| v.to_str().ok());
-        store::verify_token(state.cfg.token.as_deref(), provided_token)?;
-    }
+    authorize_create(&state, &headers)?;
 
     let ip = Some(client_ip(ConnectInfo(remote_addr)));
     store::check_cidr(&state.cfg.allow_cidr, ip)?;
@@ -192,11 +207,7 @@ async fn create_paste(
         path: draft.rel_path.clone(),
         commit: commit.commit,
         raw_url: format!("/api/v1/p/{}/raw", draft.id),
-        view_url: format!(
-            "/p/{}/{}",
-            draft.id,
-            store::slug_from_rel_path(&draft.rel_path).unwrap_or_else(|| "paste".to_string())
-        ),
+        view_url: format!("/p/{}", draft.id),
         meta_url: format!("/api/v1/p/{}", draft.id),
     };
 
@@ -212,6 +223,76 @@ async fn create_paste(
     }
 
     Ok((StatusCode::CREATED, axum::Json(resp)))
+}
+
+async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> AppResult<impl IntoResponse> {
+    authorize_create(&state, &headers)?;
+
+    let ip = Some(client_ip(ConnectInfo(remote_addr)));
+    store::check_cidr(&state.cfg.allow_cidr, ip)?;
+
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut name: Option<String> = None;
+    let mut tag: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("invalid multipart payload: {e}")))?
+    {
+        let field_name = field.name().unwrap_or_default().to_string();
+        match field_name.as_str() {
+            "file" => {
+                if file_bytes.is_some() {
+                    return Err(AppError::BadRequest("duplicate file field".to_string()));
+                }
+                if name.is_none() {
+                    name = field.file_name().map(ToString::to_string);
+                }
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("failed to read file field: {e}")))?;
+                file_bytes = Some(bytes.to_vec());
+            }
+            "name" => {
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("invalid name field: {e}")))?;
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    name = Some(v);
+                }
+            }
+            "tag" => {
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("invalid tag field: {e}")))?;
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    tag = Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let bytes = file_bytes.ok_or_else(|| AppError::BadRequest("missing file field".to_string()))?;
+    if bytes.len() > state.cfg.max_bytes {
+        return Err(AppError::TooLarge(
+            "request body exceeds max-bytes".to_string(),
+        ));
+    }
+
+    let uploaded = store::persist_upload(&state.paths, &bytes, name, tag)?;
+    Ok((StatusCode::OK, axum::Json(uploaded)))
 }
 
 async fn get_meta(
@@ -271,11 +352,46 @@ async fn recent(
     Ok(axum::Json(out))
 }
 
+async fn get_file(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> AppResult<Response> {
+    let (bytes, content_type) = store::read_uploaded_file(&state.paths, &name)?;
+    let mut response = Response::new(Body::from(bytes));
+    let content_type = header::HeaderValue::from_str(&content_type)
+        .map_err(|e| AppError::internal(format!("invalid content type header: {e}")))?;
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
 async fn render_view(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> AppResult<impl IntoResponse> {
-    render_view_by_id(&state, &id).await
+    Path(key): Path<String>,
+) -> AppResult<Response> {
+    match store::read_meta(&state.paths.repo, &state.cfg, &key) {
+        Ok(_) => {
+            let html = render_view_by_id(&state, &key).await?;
+            Ok(html.into_response())
+        }
+        Err(AppError::NotFound(_)) => {
+            if let Some(id) = store::resolve_slug_id(&state.paths.repo, &key)? {
+                let target = format!("/p/{id}");
+                return redirect_to(&target);
+            }
+            Err(AppError::NotFound("paste not found".to_string()))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn render_view_with_slug(
@@ -301,7 +417,7 @@ async fn render_view_by_id_with_mode(
     id: &str,
     force_markdown: bool,
 ) -> AppResult<Html<String>> {
-    let meta = store::read_meta(&state.paths.repo, &state.cfg, &id)?;
+    let meta = store::read_meta(&state.paths.repo, &state.cfg, id)?;
     let bytes = store::read_paste(&state.paths.repo, &meta)?;
     let body = String::from_utf8_lossy(&bytes);
     let html = if force_markdown
@@ -313,7 +429,13 @@ async fn render_view_by_id_with_mode(
     } else {
         format!("<pre>{}</pre>", render::html_escape(&body))
     };
-    Ok(Html(render::render_page(&meta.id, &html)))
+    let page_body = render::render_view_shell(&meta.id, &html, &body);
+    let canonical_url = format!("/p/{}", meta.id);
+    Ok(Html(render::render_page(
+        &meta.id,
+        &page_body,
+        Some(&canonical_url),
+    )))
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -329,6 +451,25 @@ async fn readyz(State(state): State<Arc<AppState>>) -> AppResult<impl IntoRespon
 
 fn client_ip(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> IpAddr {
     addr.ip()
+}
+
+fn redirect_to(location: &str) -> AppResult<Response> {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::FOUND;
+    let location = header::HeaderValue::from_str(location)
+        .map_err(|e| AppError::internal(format!("invalid redirect location: {e}")))?;
+    response.headers_mut().insert(header::LOCATION, location);
+    Ok(response)
+}
+
+fn authorize_create(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
+    if state.api_keys.enabled() {
+        auth::authorize(&state.api_keys, headers, Scope::PasteCreate)?;
+    } else {
+        let provided_token = headers.get("X-Paste-Token").and_then(|v| v.to_str().ok());
+        store::verify_token(state.cfg.token.as_deref(), provided_token)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

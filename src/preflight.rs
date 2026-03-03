@@ -18,6 +18,8 @@ pub fn run_preflight(cfg: &ServeCmd) -> AppResult<()> {
         .map_err(|e| AppError::io("create idempotency dir", e))?;
     fs::create_dir_all(&paths.tmp).map_err(|e| AppError::io("create tmp dir", e))?;
     fs::create_dir_all(&paths.repo).map_err(|e| AppError::io("create repo dir", e))?;
+    fs::create_dir_all(&paths.files).map_err(|e| AppError::io("create files dir", e))?;
+    fs::create_dir_all(&paths.files_meta).map_err(|e| AppError::io("create files meta dir", e))?;
 
     let write_test = paths.run.join(".write_test");
     fs::write(&write_test, b"ok").map_err(|e| AppError::io("write test file", e))?;
