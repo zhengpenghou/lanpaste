@@ -1,0 +1,23 @@
+{
+  "id": "01KJTJF08K2VN88R1YBQCDX9ED",
+  "created_at": [
+    2026,
+    62,
+    19,
+    23,
+    10,
+    995108420,
+    0,
+    0,
+    0
+  ],
+  "path": "pastes/2026/03/03/01KJTJF08K2VN88R1YBQCDX9ED__lanpaste-feature-rich-test.md",
+  "slug": "lanpaste-feature-rich-test",
+  "size": 1160,
+  "content_type": "text/markdown; charset=utf-8",
+  "commit": "",
+  "sha256": "67752f552f093a74d77f151fe7207f4f8e96fd6cffff8a7973fc95fa0c85ed7e",
+  "tag": "test",
+  "client_ip": "192.168.1.8",
+  "user_agent": "curl/8.7.1"
+}

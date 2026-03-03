@@ -1,12 +1,23 @@
 use std::{fs, net::SocketAddr, sync::Arc};
 
 use axum::{extract::connect_info::MockConnectInfo, http::StatusCode};
-use axum_test::TestServer;
+use axum_test::{
+    TestServer,
+    multipart::{MultipartForm, Part},
+};
 use lanpaste::{
     config::{PushMode, ServeCmd},
     gitops::FileLock,
     http, preflight,
 };
+
+const ONE_PX_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xB5,
+    0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xFC,
+    0x5F, 0x0F, 0x00, 0x02, 0x7F, 0x01, 0xF5, 0x90, 0xA1, 0x8D, 0xA5, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
 
 fn test_cfg(base: &std::path::Path) -> ServeCmd {
     ServeCmd {
@@ -76,7 +87,7 @@ async fn create_and_read_endpoints_work() {
     let id = json["id"].as_str().expect("id");
     let create_commit = json["commit"].as_str().expect("commit").to_string();
     let view_url = json["view_url"].as_str().expect("view_url").to_string();
-    assert_eq!(view_url, format!("/p/{id}/note.md"));
+    assert_eq!(view_url, format!("/p/{id}"));
     assert!(!create_commit.is_empty());
 
     let api = server.get("/api").await;
@@ -98,6 +109,10 @@ async fn create_and_read_endpoints_work() {
 
     let dashboard_alias = server.get("/dashboard").await;
     dashboard_alias.assert_status(StatusCode::OK);
+
+    let recent_page = server.get("/recent?tag=test").await;
+    recent_page.assert_status(StatusCode::OK);
+    assert!(recent_page.text().contains("Recent Pastes"));
 
     let meta = server.get(&format!("/api/v1/p/{id}")).await;
     meta.assert_status(StatusCode::OK);
@@ -146,6 +161,20 @@ async fn create_and_read_endpoints_work() {
     let md_view = server.get(&format!("/p/{id}/md")).await;
     md_view.assert_status(StatusCode::OK);
     assert!(md_view.text().contains("<h1>hello</h1>") || md_view.text().contains("hello"));
+    server
+        .get(&format!("/p/{id}/note"))
+        .await
+        .assert_status(StatusCode::OK);
+
+    server
+        .get(&format!("/p/%2e%2e%2fmeta%2f{id}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    server
+        .get(&format!("/api/v1/p/%2e%2e%2fmeta%2f{id}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
 
     server.get("/healthz").await.assert_status(StatusCode::OK);
     server.get("/readyz").await.assert_status(StatusCode::OK);
@@ -187,6 +216,165 @@ async fn auth_and_size_and_cidr_enforced() {
         .text("too-long!!")
         .await
         .assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn upload_image_and_embed_render_works() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = test_cfg(dir.path());
+    preflight::run_preflight(&cfg).expect("preflight");
+    let state = Arc::new(preflight::build_state(cfg).expect("state"));
+    let server = TestServer::new(
+        http::app(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4108)))),
+    )
+    .expect("server");
+
+    let form = MultipartForm::new()
+        .add_text("name", "chart.png")
+        .add_text("tag", "charts")
+        .add_part(
+            "file",
+            Part::bytes(ONE_PX_PNG.to_vec())
+                .file_name("chart.png")
+                .mime_type("image/png"),
+        );
+
+    let upload = server
+        .post("/api/v1/upload")
+        .add_header("X-Paste-Token", "tok")
+        .multipart(form)
+        .await;
+    upload.assert_status(StatusCode::OK);
+    let upload_json: serde_json::Value = upload.json();
+    for key in [
+        "id",
+        "url",
+        "contentType",
+        "bytes",
+        "width",
+        "height",
+        "createdAt",
+    ] {
+        assert!(upload_json.get(key).is_some(), "missing upload key {key}");
+    }
+    assert_eq!(upload_json["contentType"], "image/png");
+    assert_eq!(upload_json["width"], 1);
+    assert_eq!(upload_json["height"], 1);
+
+    let file_url = upload_json["url"].as_str().expect("url").to_string();
+    let file = server.get(&file_url).await;
+    file.assert_status(StatusCode::OK);
+    assert_eq!(
+        file.header("content-type").to_str().expect("content-type"),
+        "image/png"
+    );
+    assert_eq!(
+        file.header("cache-control")
+            .to_str()
+            .expect("cache-control"),
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(
+        file.header("x-content-type-options")
+            .to_str()
+            .expect("x-content-type-options"),
+        "nosniff"
+    );
+    assert_eq!(file.as_bytes(), ONE_PX_PNG);
+
+    let upload_dup = server
+        .post("/api/v1/upload")
+        .add_header("X-Paste-Token", "tok")
+        .multipart(
+            MultipartForm::new().add_part(
+                "file",
+                Part::bytes(ONE_PX_PNG.to_vec())
+                    .file_name("chart-dup.png")
+                    .mime_type("image/png"),
+            ),
+        )
+        .await;
+    upload_dup.assert_status(StatusCode::OK);
+    let upload_dup_json: serde_json::Value = upload_dup.json();
+    assert_eq!(upload_json["id"], upload_dup_json["id"]);
+    assert_eq!(upload_json["url"], upload_dup_json["url"]);
+
+    let paste = format!("# chart\\n\\n![Chart]({file_url})");
+    let created = server
+        .post("/api/v1/paste?name=with-chart.md&tag=charts")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Content-Type", "text/markdown")
+        .text(&paste)
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let id = created.json::<serde_json::Value>()["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let view = server.get(&format!("/p/{id}/md")).await;
+    view.assert_status(StatusCode::OK);
+    let body = view.text();
+    assert!(body.contains(&format!("src=\"{file_url}\"")));
+    assert!(body.contains("Copy raw markdown"));
+}
+
+#[tokio::test]
+async fn slug_alias_redirects_to_canonical_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cfg = test_cfg(dir.path());
+    preflight::run_preflight(&cfg).expect("preflight");
+    let state = Arc::new(preflight::build_state(cfg).expect("state"));
+    let server = TestServer::new(
+        http::app(state).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4109)))),
+    )
+    .expect("server");
+
+    let first = server
+        .post("/api/v1/paste?name=brief-2026-03-03.md")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Content-Type", "text/markdown")
+        .text("# first")
+        .await;
+    first.assert_status(StatusCode::CREATED);
+    let first_id = first.json::<serde_json::Value>()["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    let second = server
+        .post("/api/v1/paste?name=brief-2026-03-03.md")
+        .add_header("X-Paste-Token", "tok")
+        .add_header("Content-Type", "text/markdown")
+        .text("# second")
+        .await;
+    second.assert_status(StatusCode::CREATED);
+    let second_id = second.json::<serde_json::Value>()["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    let alias = server.get("/p/brief-2026-03-03").await;
+    alias.assert_status(StatusCode::FOUND);
+    assert_eq!(
+        alias.header("location").to_str().expect("location"),
+        format!("/p/{first_id}")
+    );
+
+    let alias_two = server.get("/p/brief-2026-03-03-2").await;
+    alias_two.assert_status(StatusCode::FOUND);
+    assert_eq!(
+        alias_two.header("location").to_str().expect("location"),
+        format!("/p/{second_id}")
+    );
+
+    server
+        .get(&format!("/p/{first_id}"))
+        .await
+        .assert_status(StatusCode::OK);
+    server
+        .get(&format!("/p/{second_id}"))
+        .await
+        .assert_status(StatusCode::OK);
 }
 
 #[tokio::test]

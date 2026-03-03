@@ -65,7 +65,7 @@ pub fn run_git(repo: &Path, args: &[&str], cfg: &ServeCmd) -> AppResult<String> 
         .env("GIT_COMMITTER_EMAIL", &cfg.git_author_email);
     let out = cmd
         .output()
-        .map_err(|e| AppError::internal(format!("git {:?} failed: {e}", args)))?;
+        .map_err(|e| AppError::internal(format!("git {args:?} failed: {e}")))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -92,6 +92,7 @@ pub fn bootstrap_repo(repo: &Path, cfg: &ServeCmd) -> AppResult<()> {
 
     fs::create_dir_all(repo.join("pastes")).map_err(|e| AppError::io("create pastes", e))?;
     fs::create_dir_all(repo.join("meta")).map_err(|e| AppError::io("create meta", e))?;
+    fs::create_dir_all(repo.join("slugs")).map_err(|e| AppError::io("create slugs", e))?;
 
     let readme = repo.join("README.md");
     if !readme.exists() {
@@ -140,7 +141,7 @@ pub fn bootstrap_repo(repo: &Path, cfg: &ServeCmd) -> AppResult<()> {
     if !has_commit {
         run_git(
             repo,
-            &["add", "README.md", ".gitignore", "pastes", "meta"],
+            &["add", "README.md", ".gitignore", "pastes", "meta", "slugs"],
             cfg,
         )?;
         run_git(repo, &["commit", "-m", "init lanpaste repository"], cfg)?;
@@ -155,7 +156,11 @@ pub fn commit_paste(
     push_mode: PushMode,
     remote: &str,
 ) -> AppResult<GitCommitResult> {
-    run_git(repo, &["add", &draft.rel_path, &draft.meta_rel_path], cfg)?;
+    run_git(
+        repo,
+        &["add", &draft.rel_path, &draft.meta_rel_path, &draft.slug_rel_path],
+        cfg,
+    )?;
     run_git(repo, &["commit", "-m", &draft.subject], cfg)?;
     let commit = run_git(repo, &["rev-parse", "--short=12", "HEAD"], cfg)?;
 
@@ -179,6 +184,7 @@ pub fn commit_paste(
                 let _ = run_git(repo, &["reset", "--soft", "HEAD~1"], cfg);
                 let _ = fs::remove_file(&draft.abs_path);
                 let _ = fs::remove_file(&draft.meta_path);
+                let _ = fs::remove_file(&draft.slug_path);
                 let _ = run_git(repo, &["reset"], cfg);
                 return Err(AppError::Internal(format!(
                     "push failed in strict mode: {push_err:?}"

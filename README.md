@@ -7,14 +7,26 @@ It stores each paste as a real file in a local Git repo, writes metadata next to
 ## Features
 
 - Git-backed storage with one commit per paste
+- Canonical + human-friendly URLs:
+  - Canonical: `/p/{id}`
+  - Slug alias: `/p/{slug}` -> `302` redirect to `/p/{id}`
+  - Legacy alias still supported: `/p/{id}/{slug}`
 - Metadata per paste (`id`, `sha256`, `commit`, `content_type`, `tag`, `size`, `created_at`)
 - Dashboard routes:
   - `/`
   - `/dashboard`
+  - `/recent` (optional `?tag=...` filter)
 - API index route:
   - `/api`
-- Markdown rendering for view pages (`/p/{id}/{slug}`, `/p/{id}/md`) with sanitization
-- Markdown tables, fenced code blocks, headings, LaTeX (KaTeX), and Mermaid diagram rendering
+- Markdown rendering for view pages with sanitization
+- Mobile-first view UX with copy/share controls:
+  - `Copy raw markdown`
+  - `Copy rendered text`
+  - `Copy link`
+- Markdown tables, fenced code blocks, `<details>/<summary>`, headings, LaTeX (KaTeX), and Mermaid diagram rendering
+- Image upload + serving for markdown embeds:
+  - `POST /api/v1/upload` (multipart image upload)
+  - `GET /files/{name}` (immutable-cache static image bytes)
 - Safe raw download route (`/api/v1/p/{id}/raw`) with:
   - `Content-Type: application/octet-stream`
   - `Content-Disposition: attachment`
@@ -118,6 +130,7 @@ Example (`--api-keys-file`):
 ```text
 <dir>/
   repo/      # git repo with paste files + metadata json
+  files/     # uploaded image bytes + sidecar metadata
   run/       # daemon.lock + git.lock
   tmp/       # scratch
 ```
@@ -128,6 +141,7 @@ Example (`--api-keys-file`):
 repo/
   pastes/YYYY/MM/DD/<ULID>__<slug>.<ext>
   meta/<ULID>.json
+  slugs/<slug>.json
 ```
 
 ## API Overview
@@ -135,6 +149,7 @@ repo/
 ### Dashboard + Index
 
 - `GET /` and `GET /dashboard`: HTML dashboard with recent pastes and links
+- `GET /recent?tag=<tag>`: recent listing with optional tag filter
 - `GET /api`: JSON index of API endpoints
 
 ### Create paste
@@ -165,7 +180,7 @@ Example response (`201`):
   "path": "pastes/2026/02/13/01H...__note.md",
   "commit": "abc123def456",
   "raw_url": "/api/v1/p/01H.../raw",
-  "view_url": "/p/01H.../note.md",
+  "view_url": "/p/01H...",
   "meta_url": "/api/v1/p/01H..."
 }
 ```
@@ -195,11 +210,37 @@ Idempotency replay behavior:
 - `n` defaults to `50`, capped at `500`
 - Optional exact tag filter
 
+### Upload image
+
+- `POST /api/v1/upload`
+- Body: `multipart/form-data`
+  - `file` (required): png/jpg/webp/gif
+  - `name` (optional)
+  - `tag` (optional)
+- Header:
+  - `X-API-Key: <key>` when `--api-keys-file` is configured (scope: `paste:create`)
+  - `X-Paste-Token: <token>` when API keys are disabled and `--token` is set
+
+Example:
+
+```bash
+curl -sS -F "file=@chart.png" -F "tag=charts" \
+  -H "X-Paste-Token: tok" \
+  "http://127.0.0.1:8090/api/v1/upload"
+```
+
+### Serve uploaded image
+
+- `GET /files/{name}`
+- Public LAN route with immutable caching headers
+- Intended for markdown embeds like `![Chart](/files/<id>.png)`
+
 ### Rendered view
 
-- `GET /p/{id}/{slug}` (canonical)
+- `GET /p/{id}` (canonical)
+- `GET /p/{slug}` (slug alias, redirects `302` to `/p/{id}`)
+- `GET /p/{id}/{slug}` (legacy alias)
 - `GET /p/{id}/md` (force markdown rendering)
-- `GET /p/{id}` (legacy alias)
 - Markdown pastes are rendered and sanitized; markdown-looking content is auto-detected
 - Non-markdown content is shown in escaped `<pre>`
 

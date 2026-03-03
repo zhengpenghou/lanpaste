@@ -35,11 +35,14 @@ fn openapi_spec_declares_core_routes_and_security() {
     for path in [
         "/",
         "/dashboard",
+        "/recent",
         "/api",
         "/api/v1/paste",
+        "/api/v1/upload",
         "/api/v1/p/{id}",
         "/api/v1/p/{id}/raw",
         "/api/v1/recent",
+        "/files/{name}",
         "/p/{id}/md",
         "/p/{id}",
         "/p/{id}/{slug}",
@@ -92,11 +95,8 @@ async fn runtime_contract_matches_openapi_critical_shapes() {
     }
     let id = created_json["id"].as_str().expect("id");
     assert!(
-        created_json["view_url"]
-            .as_str()
-            .expect("view_url")
-            .starts_with(&format!("/p/{id}/")),
-        "view_url should include slug path segment"
+        created_json["view_url"].as_str().expect("view_url") == format!("/p/{id}"),
+        "view_url should point to canonical id route"
     );
 
     let meta = server.get(&format!("/api/v1/p/{id}")).await;
