@@ -12,8 +12,8 @@
 - [x] Contracts/docs: update OpenAPI + README
 - [x] Verification: cargo test
 - [x] Verification: cargo clippy --all-targets --all-features -- -D warnings
-- [ ] Git: split into small commits
-- [ ] Git: push branch and open PR
+- [x] Git: split into small commits
+- [x] Git: push branch and open PR
 
 ## Review
 - Added mobile-first viewer polish (copy controls, code-copy buttons, table overflow wrapping, details/summary support, image lightbox).
